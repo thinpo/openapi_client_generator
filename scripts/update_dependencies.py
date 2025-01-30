@@ -3,40 +3,25 @@ import subprocess
 import re
 from pathlib import Path
 from typing import Dict, Optional
-import json
+import pkg_resources
+import requests
 
 def get_installed_version(package_name: str) -> str:
-    """Get the installed version of a package using uv."""
+    """Get the installed version of a package using pip."""
     try:
-        result = subprocess.run(
-            ["uv", "pip", "list", "--json"],
-            capture_output=True,
-            text=True
-        )
-        packages = json.loads(result.stdout)
-        for package in packages:
-            if package["name"].lower() == package_name.lower():
-                return package["version"]
-        return "Not installed"
-    except Exception:
+        dist = pkg_resources.get_distribution(package_name)
+        return dist.version
+    except pkg_resources.DistributionNotFound:
         return "Not installed"
 
 def get_latest_version(package_name: str) -> str:
-    """Get the latest version available on PyPI using uv."""
+    """Get the latest version available on PyPI using the JSON API."""
     try:
-        result = subprocess.run(
-            ["uv", "pip", "search", package_name, "--json"],
-            capture_output=True,
-            text=True
-        )
-        data = json.loads(result.stdout)
-        if data and len(data) > 0:
-            # Find exact match
-            for pkg in data:
-                if pkg["name"].lower() == package_name.lower():
-                    return pkg["version"]
+        response = requests.get(f"https://pypi.org/pypi/{package_name}/json")
+        if response.status_code == 200:
+            return response.json()["info"]["version"]
         return "Unknown"
-    except Exception as e:
+    except Exception:
         return "Unknown"
 
 def parse_requirements(filename: str) -> Dict[str, Optional[str]]:
@@ -62,20 +47,7 @@ def update_requirements(requirements: Dict[str, Optional[str]], filename: str):
             else:
                 print(f"Warning: Could not determine latest version for {package}")
 
-def check_uv_installed():
-    """Check if uv is installed."""
-    try:
-        subprocess.run(["uv", "--version"], capture_output=True)
-        return True
-    except FileNotFoundError:
-        return False
-
 def main():
-    if not check_uv_installed():
-        print("Error: uv is not installed. Please install it first:")
-        print("curl -LsSf https://astral.sh/uv/install.sh | sh")
-        return
-
     requirements_file = "requirements.txt"
     
     if not Path(requirements_file).exists():
@@ -99,7 +71,7 @@ def main():
     if update.lower() == 'y':
         update_requirements(current_requirements, requirements_file)
         print(f"\nUpdated {requirements_file} with latest versions")
-        print("To install updated packages, run: uv pip install -r requirements.txt")
+        print("To install updated packages, run: pip install -r requirements.txt")
     else:
         print("\nNo changes made")
 
