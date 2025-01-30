@@ -1,4 +1,4 @@
-from typing import Dict, Any, List
+from typing import Dict, Any, List, ForwardRef
 import json
 from jinja2 import Template
 import re
@@ -42,18 +42,48 @@ class ClientGenerator:
         schemas = []
         components = self.spec.get('components', {}).get('schemas', {})
         
-        # First pass: Generate basic models
+        # Build dependency graph
+        dependencies = {}
         for name, schema in components.items():
-            if 'allOf' not in schema:
-                schema_code = self._generate_pydantic_model(name, schema)
-                schemas.append(schema_code)
-        
-        # Second pass: Generate models with inheritance
-        for name, schema in components.items():
+            deps = set()
+            # Check for direct references in properties
+            for prop in schema.get('properties', {}).values():
+                if '$ref' in prop:
+                    deps.add(prop['$ref'].split('/')[-1])
+                elif prop.get('type') == 'array' and '$ref' in prop.get('items', {}):
+                    deps.add(prop['items']['$ref'].split('/')[-1])
+            # Check for inheritance
+            if 'allOf' in schema:
+                for part in schema['allOf']:
+                    if '$ref' in part:
+                        deps.add(part['$ref'].split('/')[-1])
+            dependencies[name] = deps
+
+        # Topologically sort schemas
+        processed = set()
+        ordered_schemas = []
+
+        def process_schema(name):
+            if name in processed:
+                return
+            for dep in dependencies[name]:
+                if dep in dependencies:  # Only process if it's a schema we need to generate
+                    process_schema(dep)
+            processed.add(name)
+            ordered_schemas.append(name)
+
+        for name in dependencies:
+            process_schema(name)
+
+        # Generate schemas in dependency order
+        for name in ordered_schemas:
+            schema = components[name]
             if 'allOf' in schema:
                 schema_code = self._generate_inherited_model(name, schema)
-                schemas.append(schema_code)
-                
+            else:
+                schema_code = self._generate_pydantic_model(name, schema)
+            schemas.append(schema_code)
+
         return schemas
         
     def _generate_methods(self) -> List[str]:
@@ -75,7 +105,7 @@ class ClientGenerator:
                     
         return methods
         
-    def _generate_pydantic_model(self, name: str, schema: Dict[str, Any]) -> str:
+    def _generate_pydantic_model(self, name: str, schema: Dict[str, Any]) -> Dict[str, str]:
         """
         Generate a Pydantic model from a schema definition
         """
@@ -91,14 +121,17 @@ class ClientGenerator:
                 field += " = None"
             fields.append(field)
             
-        return f"""class {name}(BaseModel):
+        return {
+            "__name__": name,
+            "code": f"""class {name}(BaseModel):
     \"\"\"
     {schema.get('description', '')}
     \"\"\"
 {chr(10).join(fields)}
 """
+        }
 
-    def _generate_inherited_model(self, name: str, schema: Dict[str, Any]) -> str:
+    def _generate_inherited_model(self, name: str, schema: Dict[str, Any]) -> Dict[str, str]:
         """
         Generate a Pydantic model that inherits from another model
         """
@@ -116,12 +149,15 @@ class ClientGenerator:
                 field += " = None"
             fields.append(field)
             
-        return f"""class {name}({parent_ref}):
+        return {
+            "__name__": name,
+            "code": f"""class {name}({parent_ref}):
     \"\"\"
     {schema.get('description', '')}
     \"\"\"
 {chr(10).join(fields)}
 """
+        }
         
     def _generate_method(self, path: str, method: str, operation: Dict[str, Any], path_params: List[Dict[str, Any]] = None) -> str:
         """
@@ -246,7 +282,10 @@ class ClientGenerator:
         lines = []
         for param in param_names:
             lines.append(f"if {param} is not None:")
-            lines.append(f"    params['{param}'] = {param}")
+            lines.append(f"    if isinstance({param}, (dict, list)):")
+            lines.append(f"        params['{param}'] = json.dumps({param})")
+            lines.append(f"    else:")
+            lines.append(f"        params['{param}'] = str({param})")
         return "\n        ".join(lines)
 
     def _generate_security_headers(self, security: List[Dict[str, List[str]]]) -> str:
@@ -272,7 +311,7 @@ class ClientGenerator:
         Render the client template with the generated code
         """
         template = """
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, ForwardRef
 from pydantic import BaseModel
 import aiohttp
 import json
@@ -283,8 +322,18 @@ class ApiError(Exception):
     status_code: int
     error_data: Dict[str, Any]
 
+# Forward references for circular dependencies
 {% for schema in schemas %}
-{{ schema }}
+{{ schema.__name__ }} = ForwardRef('{{ schema.__name__ }}')
+{% endfor %}
+
+{% for schema in schemas %}
+{{ schema.code }}
+{% endfor %}
+
+# Update forward references
+{% for schema in schemas %}
+{{ schema.__name__ }}.update_forward_refs()
 {% endfor %}
 
 class {{ title }}Client:
