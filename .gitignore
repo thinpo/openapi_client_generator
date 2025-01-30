@@ -44,4 +44,10 @@ htmlcov/
 
 # Temporary files from dependency updates
 *.bak
-*.tmp 
+*.tmp
+
+# Test files
+test_api.yaml
+complex_api.yaml
+generated_client.py
+ecommerce_client.py 
